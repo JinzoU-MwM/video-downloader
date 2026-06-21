@@ -1,0 +1,4 @@
+<resources>
+    <style name="Theme.VideoDownloader" parent="android:Theme.Material.Light.NoActionBar" />
+    <style name="Theme.VideoDownloader.Transparent" parent="android:Theme.Translucent.NoTitleBar" />
+</resources>
