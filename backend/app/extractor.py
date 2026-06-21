@@ -94,24 +94,65 @@ def _is_transient(msg: str) -> bool:
     return any(h in m for h in _TRANSIENT_HINTS)
 
 
-def extract(url: str, max_attempts: int | None = None) -> dict:
-    platform = detect_platform(url)
-    if platform is None:
-        raise ExtractError("unsupported platform")
+def _attempts() -> int:
+    return int(os.environ.get("EXTRACT_ATTEMPTS", "8"))
 
-    attempts = max_attempts or int(os.environ.get("EXTRACT_ATTEMPTS", "8"))
-    delay = float(os.environ.get("EXTRACT_RETRY_DELAY", "0.6"))
 
+def _delay() -> float:
+    return float(os.environ.get("EXTRACT_RETRY_DELAY", "0.6"))
+
+
+def _with_retry(fn):
+    """Run fn(); retry on transient anti-bot failures with a fresh session."""
+    attempts = _attempts()
+    delay = _delay()
     last_err = "unknown error"
     for i in range(attempts):
         try:
-            return _extract_once(url, platform)
+            return fn()
         except ExtractError:
             raise
         except Exception as e:
             last_err = str(e)
-            # Anti-bot flakiness: retry with a fresh session. Other errors: fail fast.
             if not _is_transient(last_err) or i == attempts - 1:
                 raise ExtractError(last_err)
             time.sleep(delay)
     raise ExtractError(last_err)
+
+
+def extract(url: str) -> dict:
+    platform = detect_platform(url)
+    if platform is None:
+        raise ExtractError("unsupported platform")
+    return _with_retry(lambda: _extract_once(url, platform))
+
+
+def _download_once(url: str, outtmpl: str) -> str:
+    opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+        "format": "mp4/best",
+        "outtmpl": outtmpl,
+        "retries": 5,
+        "fragment_retries": 5,
+    }
+    with YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(url, download=True)
+        if info and "entries" in info:
+            entries = [e for e in info["entries"] if e]
+            if not entries:
+                raise ExtractError("empty playlist")
+            info = entries[0]
+        return ydl.prepare_filename(info)
+
+
+def download(url: str, outtmpl: str) -> str:
+    """Download the video server-side via yt-dlp (handles CDN auth/cookies).
+
+    Returns the path to the downloaded file. Retries transient anti-bot failures.
+    """
+    platform = detect_platform(url)
+    if platform is None:
+        raise ExtractError("unsupported platform")
+    return _with_retry(lambda: _download_once(url, outtmpl))
