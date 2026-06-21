@@ -38,7 +38,7 @@ ssh $Server "cd $Remote && tar xzf src.tgz && rm -f src.tgz"
 Assert-Ok "remote extract"
 
 Write-Host "==> Building Docker build image (cached after first run)..."
-ssh $Server "cd $Remote && DOCKER_BUILDKIT=1 docker build -f Dockerfile.build -t android-build:34 ."
+ssh $Server "cd $Remote && docker build -f Dockerfile.build -t android-build:34 ."
 Assert-Ok "docker build image"
 
 Write-Host "==> Running build ($Mode) in container..."
