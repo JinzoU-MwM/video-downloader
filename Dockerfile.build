@@ -1,0 +1,19 @@
+# Android build environment — keeps jni-server host clean (no JDK/SDK installed on host).
+FROM eclipse-temurin:17-jdk-jammy
+
+ENV ANDROID_HOME=/opt/android-sdk
+ENV ANDROID_SDK_ROOT=$ANDROID_HOME
+ENV PATH=$PATH:$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools
+ENV GRADLE_USER_HOME=/root/.gradle
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        unzip wget git ca-certificates && rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p $ANDROID_HOME/cmdline-tools && cd $ANDROID_HOME/cmdline-tools && \
+    wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -O cmdline.zip && \
+    unzip -q cmdline.zip && mv cmdline-tools latest && rm cmdline.zip
+
+RUN yes | sdkmanager --licenses > /dev/null 2>&1 || true
+RUN sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0" > /dev/null
+
+WORKDIR /workspace
