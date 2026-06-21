@@ -1,4 +1,6 @@
+import os
 import re
+import time
 
 from yt_dlp import YoutubeDL
 
@@ -12,6 +14,18 @@ _PATTERNS = [
     ("INSTAGRAM", re.compile(r"instagram\.com", re.I)),
     ("FACEBOOK", re.compile(r"(facebook\.com|fb\.watch|fb\.com)", re.I)),
 ]
+
+# Errors that are TikTok/IG anti-bot flakiness (the page came back without data),
+# not a permanently-unavailable video. Worth retrying with a fresh session.
+_TRANSIENT_HINTS = (
+    "rehydration",
+    "unexpected response",
+    "unable to extract",
+    "challenge",
+    "please report this issue",
+    "timed out",
+    "read timed out",
+)
 
 
 def detect_platform(url: str):
@@ -49,21 +63,15 @@ def _pick_format(info: dict) -> dict:
     }
 
 
-def extract(url: str) -> dict:
-    platform = detect_platform(url)
-    if platform is None:
-        raise ExtractError("unsupported platform")
+def _extract_once(url: str, platform: str) -> dict:
     opts = {
         "quiet": True,
         "no_warnings": True,
         "skip_download": True,
         "noplaylist": True,
     }
-    try:
-        with YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-    except Exception as e:
-        raise ExtractError(str(e))
+    with YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(url, download=False)
     if info is None:
         raise ExtractError("no info extracted")
     if "entries" in info:
@@ -79,3 +87,31 @@ def extract(url: str) -> dict:
         "duration": info.get("duration"),
         "video": video,
     }
+
+
+def _is_transient(msg: str) -> bool:
+    m = msg.lower()
+    return any(h in m for h in _TRANSIENT_HINTS)
+
+
+def extract(url: str, max_attempts: int | None = None) -> dict:
+    platform = detect_platform(url)
+    if platform is None:
+        raise ExtractError("unsupported platform")
+
+    attempts = max_attempts or int(os.environ.get("EXTRACT_ATTEMPTS", "8"))
+    delay = float(os.environ.get("EXTRACT_RETRY_DELAY", "0.6"))
+
+    last_err = "unknown error"
+    for i in range(attempts):
+        try:
+            return _extract_once(url, platform)
+        except ExtractError:
+            raise
+        except Exception as e:
+            last_err = str(e)
+            # Anti-bot flakiness: retry with a fresh session. Other errors: fail fast.
+            if not _is_transient(last_err) or i == attempts - 1:
+                raise ExtractError(last_err)
+            time.sleep(delay)
+    raise ExtractError(last_err)
