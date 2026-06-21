@@ -1,0 +1,8 @@
+services:
+  video-dl-api:
+    build: .
+    container_name: video-dl-api
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "127.0.0.1:8091:8000"
