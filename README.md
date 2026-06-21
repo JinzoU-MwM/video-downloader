@@ -24,9 +24,17 @@ Share sheet ─▶ ShareReceiverActivity ─▶ POST /extract (backend) ─▶ p
 
 ### Backend endpoints
 - `GET /health` → `{status, ytdlp_version}`
-- `POST /extract` (`X-API-Key`) → `{platform, title, thumbnail, video:{url, http_headers, …}, proxy_token}`
-- `GET /proxy?token=…` → streams media with HTTP Range support (fallback when a CDN
-  signed URL rejects the phone; the `token` is an HMAC, so it's not an open proxy)
+- `POST /extract` (`X-API-Key`) → `{platform, title, thumbnail, duration, video:{url, …}}`
+  where `video.url` is a backend **`/media`** URL (not the raw CDN URL).
+- `GET /media?token=…` → yt-dlp downloads the video **server-side** (handling TikTok's
+  JS challenge + CDN cookies) and serves the MP4 (HMAC token, cached, Range-capable).
+- `GET /proxy?token=…` → legacy direct-CDN proxy, kept for compatibility.
+
+> **Why server-side download?** TikTok's CDN URL 403s the phone (it needs the cookies
+> from the extraction session) and TikTok's anti-bot intermittently challenges the
+> server IP (~37% per attempt). The backend retries extraction until it succeeds, then
+> downloads the bytes itself — so the app just downloads a plain MP4 from `/media`.
+> A daily cron (`ytdlp-autoupdate.sh`) keeps yt-dlp on master, since TikTok/IG/FB change often.
 
 ## Deploy the backend (jni-server)
 
