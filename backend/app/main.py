@@ -9,7 +9,7 @@ from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from . import cobalt, extractor, proxy, transcode
+from . import cobalt, extractor, proxy, transcode, ytdlp_fallback
 from .config import settings
 
 app = FastAPI(title="video-dl-api")
@@ -82,23 +82,31 @@ def _fetch(url: str, dst: str):
                 f.write(chunk)
 
 
-def _download_via_cobalt(page_url: str, quality: str, mode: str, wa: bool, path: str):
-    """Resolve via Cobalt, stream the file, optionally transcode for WhatsApp.
+def _download(page_url: str, quality: str, mode: str, wa: bool, path: str):
+    """Fetch the media, then optionally transcode for WhatsApp.
 
-    Raises CobaltError (-> 422) on an empty upstream body or a transcode failure
-    so we never cache/serve a 0-byte file or leak a 500.
+    Cobalt is primary (no watermark, clean quality/audio). If Cobalt can't fetch
+    the source (e.g. TikTok anti-bot from this IP) we fall back to yt-dlp, which
+    is proven to work here. Raises CobaltError / ExtractError (-> 422) on total
+    failure, so we never cache/serve a 0-byte file or leak a 500.
     """
-    src = path + ".src"
+    ext = "mp3" if mode == "audio" else "mp4"
+    src = f"{path}.src.{ext}"
+
+    got = False
     try:
         result = cobalt.resolve(page_url, quality, mode)
         _fetch(result["url"], src)
-    except httpx.HTTPError as e:
+        got = os.path.getsize(src) > 0
+    except (cobalt.CobaltError, httpx.HTTPError):
+        got = False
+
+    if not got:
         if os.path.exists(src):
             os.remove(src)
-        raise cobalt.CobaltError(f"download failed: {type(e).__name__}")
-    if os.path.getsize(src) == 0:
-        os.remove(src)
-        raise cobalt.CobaltError("empty media from upstream")
+        produced = ytdlp_fallback.download(page_url, quality, mode, path)
+        os.replace(produced, src)
+
     if wa and mode == "video":
         try:
             transcode.transcode_whatsapp(src, path)
@@ -140,8 +148,8 @@ async def media(token: str, quality: str = "1080", mode: str = "video", wa: str 
     async with lock:
         if not (os.path.exists(path) and os.path.getsize(path) > 0):
             try:
-                await asyncio.to_thread(_download_via_cobalt, page_url, quality, mode, wa_flag, path)
-            except cobalt.CobaltError as e:
+                await asyncio.to_thread(_download, page_url, quality, mode, wa_flag, path)
+            except (cobalt.CobaltError, ytdlp_fallback.ExtractError) as e:
                 raise HTTPException(status_code=422, detail=str(e))
 
     # FileResponse serves with HTTP Range support, so the app can resume.

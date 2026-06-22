@@ -59,7 +59,7 @@ def test_media_success(tmp_path, monkeypatch):
         with open(path, "wb") as f:
             f.write(b"FAKEDATA")
 
-    monkeypatch.setattr(main, "_download_via_cobalt", fake_dl)
+    monkeypatch.setattr(main, "_download", fake_dl)
     r = client.get(f"/media{_token_query()}&quality=720&mode=video")
     assert r.status_code == 200
     assert r.content == b"FAKEDATA"
@@ -74,7 +74,7 @@ def test_media_wa_flag_passed_through(tmp_path, monkeypatch):
         seen["wa"] = wa
         open(path, "wb").write(b"X")
 
-    monkeypatch.setattr(main, "_download_via_cobalt", fake_dl)
+    monkeypatch.setattr(main, "_download", fake_dl)
     r = client.get(f"/media{_token_query()}&quality=720&mode=video&wa=1")
     assert r.status_code == 200
     assert seen["wa"] is True
@@ -82,7 +82,7 @@ def test_media_wa_flag_passed_through(tmp_path, monkeypatch):
 
 def test_media_audio_content_type(tmp_path, monkeypatch):
     monkeypatch.setattr(main.settings, "media_dir", str(tmp_path))
-    monkeypatch.setattr(main, "_download_via_cobalt",
+    monkeypatch.setattr(main, "_download",
                         lambda page_url, quality, mode, wa, path: open(path, "wb").write(b"A"))
     r = client.get(f"/media{_token_query()}&quality=720&mode=audio")
     assert r.status_code == 200
@@ -95,25 +95,71 @@ def test_media_cobalt_error(tmp_path, monkeypatch):
     def boom(page_url, quality, mode, wa, path):
         raise main.cobalt.CobaltError("slideshow not supported")
 
-    monkeypatch.setattr(main, "_download_via_cobalt", boom)
+    monkeypatch.setattr(main, "_download", boom)
     r = client.get(f"/media{_token_query()}&quality=720&mode=video")
     assert r.status_code == 422
 
 
-def test_download_empty_body_raises(tmp_path, monkeypatch):
+def _cobalt_ok(monkeypatch, body=b"COBALT"):
     monkeypatch.setattr(main.cobalt, "resolve",
                         lambda u, q, m: {"kind": "tunnel", "url": "http://x", "filename": "f"})
-    monkeypatch.setattr(main, "_fetch", lambda url, dst: open(dst, "wb").close())  # 0 bytes
+    monkeypatch.setattr(main, "_fetch", lambda url, dst: open(dst, "wb").write(body))
+
+
+def _ytdlp_writes(body=b"YTDLP"):
+    def _dl(url, quality, mode, out_base):
+        p = f"{out_base}.ytdl.{'mp3' if mode == 'audio' else 'mp4'}"
+        with open(p, "wb") as f:
+            f.write(body)
+        return p
+    return _dl
+
+
+def test_download_cobalt_success_no_fallback(tmp_path, monkeypatch):
+    _cobalt_ok(monkeypatch, b"COBALT")
+
+    def no_call(*a, **k):
+        raise AssertionError("yt-dlp must not run when Cobalt succeeds")
+
+    monkeypatch.setattr(main.ytdlp_fallback, "download", no_call)
     out = str(tmp_path / "o.mp4")
-    with pytest.raises(main.cobalt.CobaltError):
-        main._download_via_cobalt("u", "720", "video", False, out)
-    assert not os.path.exists(out)  # never cached an empty file
+    main._download("u", "720", "video", False, out)
+    assert open(out, "rb").read() == b"COBALT"
+
+
+def test_download_falls_back_on_cobalt_error(tmp_path, monkeypatch):
+    monkeypatch.setattr(main.cobalt, "resolve",
+                        lambda u, q, m: (_ for _ in ()).throw(main.cobalt.CobaltError("fetch.fail")))
+    monkeypatch.setattr(main.ytdlp_fallback, "download", _ytdlp_writes(b"YTDLP"))
+    out = str(tmp_path / "o.mp4")
+    main._download("u", "720", "video", False, out)
+    assert open(out, "rb").read() == b"YTDLP"
+
+
+def test_download_falls_back_when_cobalt_empty(tmp_path, monkeypatch):
+    _cobalt_ok(monkeypatch, b"")  # 0-byte cobalt tunnel
+    monkeypatch.setattr(main.ytdlp_fallback, "download", _ytdlp_writes(b"YTDLP"))
+    out = str(tmp_path / "o.mp4")
+    main._download("u", "720", "video", False, out)
+    assert open(out, "rb").read() == b"YTDLP"
+
+
+def test_download_both_fail_raises(tmp_path, monkeypatch):
+    monkeypatch.setattr(main.cobalt, "resolve",
+                        lambda u, q, m: (_ for _ in ()).throw(main.cobalt.CobaltError("fetch.fail")))
+
+    def boom(url, quality, mode, out_base):
+        raise main.ytdlp_fallback.ExtractError("yt-dlp blocked too")
+
+    monkeypatch.setattr(main.ytdlp_fallback, "download", boom)
+    out = str(tmp_path / "o.mp4")
+    with pytest.raises(main.ytdlp_fallback.ExtractError):
+        main._download("u", "720", "video", False, out)
+    assert not os.path.exists(out)
 
 
 def test_download_transcode_failure_raises(tmp_path, monkeypatch):
-    monkeypatch.setattr(main.cobalt, "resolve",
-                        lambda u, q, m: {"kind": "tunnel", "url": "http://x", "filename": "f"})
-    monkeypatch.setattr(main, "_fetch", lambda url, dst: open(dst, "wb").write(b"DATA"))
+    _cobalt_ok(monkeypatch, b"DATA")
 
     def boom(src, dst):
         raise subprocess.CalledProcessError(183, ["ffmpeg"])
@@ -121,27 +167,11 @@ def test_download_transcode_failure_raises(tmp_path, monkeypatch):
     monkeypatch.setattr(main.transcode, "transcode_whatsapp", boom)
     out = str(tmp_path / "o.mp4")
     with pytest.raises(main.cobalt.CobaltError):
-        main._download_via_cobalt("u", "720", "video", True, out)
-
-
-def test_download_fetch_http_error_raises(tmp_path, monkeypatch):
-    monkeypatch.setattr(main.cobalt, "resolve",
-                        lambda u, q, m: {"kind": "tunnel", "url": "http://x", "filename": "f"})
-
-    def bad_fetch(url, dst):
-        raise main.httpx.ConnectError("boom")
-
-    monkeypatch.setattr(main, "_fetch", bad_fetch)
-    out = str(tmp_path / "o.mp4")
-    with pytest.raises(main.cobalt.CobaltError):
-        main._download_via_cobalt("u", "720", "video", False, out)
-    assert not os.path.exists(out)
+        main._download("u", "720", "video", True, out)
 
 
 def test_download_video_success(tmp_path, monkeypatch):
-    monkeypatch.setattr(main.cobalt, "resolve",
-                        lambda u, q, m: {"kind": "tunnel", "url": "http://x", "filename": "f"})
-    monkeypatch.setattr(main, "_fetch", lambda url, dst: open(dst, "wb").write(b"VIDEOBYTES"))
+    _cobalt_ok(monkeypatch, b"VIDEOBYTES")
     out = str(tmp_path / "o.mp4")
-    main._download_via_cobalt("u", "720", "video", False, out)
+    main._download("u", "720", "video", False, out)
     assert open(out, "rb").read() == b"VIDEOBYTES"
