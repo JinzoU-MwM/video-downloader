@@ -4,5 +4,20 @@ services:
     container_name: video-dl-api
     restart: unless-stopped
     env_file: .env
+    environment:
+      - COBALT_API_URL=http://cobalt-api:9000/
     ports:
       - "127.0.0.1:8091:8000"
+    depends_on:
+      - cobalt-api
+
+  cobalt-api:
+    # Pin to the current stable major (verified against the upstream example).
+    image: ghcr.io/imputnet/cobalt:11
+    container_name: cobalt-api
+    restart: unless-stopped
+    init: true
+    read_only: true
+    environment:
+      - API_URL=http://cobalt-api:9000/
+    # internal-only: no `ports:` block on purpose.
