@@ -5,6 +5,7 @@ import android.content.ContentValues
 import android.content.Context
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
+import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
@@ -21,7 +22,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import org.json.JSONObject
 import java.io.File
 import java.io.RandomAccessFile
 
@@ -35,6 +35,7 @@ class DownloadWorker @AssistedInject constructor(
 
     private val downloadId: Long get() = inputData.getLong(KEY_ID, -1L)
     private val notifId: Int get() = (downloadId % 90000L).toInt() + 1000
+    private val isAudio: Boolean get() = inputData.getBoolean(KEY_AUDIO, false)
 
     override suspend fun getForegroundInfo(): ForegroundInfo {
         NotificationHelper.ensureChannel(applicationContext)
@@ -49,41 +50,31 @@ class DownloadWorker @AssistedInject constructor(
 
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
         val id = downloadId
-        val direct = inputData.getString(KEY_DIRECT) ?: return@withContext fail(id)
-        val proxy = inputData.getString(KEY_PROXY)
+        val url = inputData.getString(KEY_URL) ?: return@withContext fail(id)
         val title = inputData.getString(KEY_TITLE) ?: "video"
-        val headers = inputData.getString(KEY_HEADERS)?.let { runCatching { JSONObject(it) }.getOrNull() }
+        val ext = if (isAudio) "mp3" else "mp4"
 
         NotificationHelper.ensureChannel(applicationContext)
         setForeground(getForegroundInfo())
 
-        val tmp = File(applicationContext.cacheDir, "dl_$id.mp4")
-        val ok = tryDownload(direct, headers, tmp, id, title) ||
-            (proxy != null && tryDownload(proxy, null, tmp, id, title))
-
-        if (!ok) {
+        val tmp = File(applicationContext.cacheDir, "dl_$id.$ext")
+        if (!tryDownload(url, tmp, id, title)) {
             repo.setFailed(id)
             return@withContext if (runAttemptCount < 3) Result.retry() else Result.failure()
         }
 
-        val saved = saveToMediaStore(tmp, "rdl_${id}_${createdStamp()}.mp4")
+        val name = "rdl_${id}_${createdStamp()}.$ext"
+        val saved = saveToStore(tmp, name, audio = isAudio)
         tmp.delete()
         repo.setCompleted(id, saved)
         notify(NotificationHelper.done(applicationContext, title))
         Result.success()
     }
 
-    private fun tryDownload(
-        url: String,
-        headers: JSONObject?,
-        out: File,
-        id: Long,
-        title: String,
-    ): Boolean {
+    private fun tryDownload(url: String, out: File, id: Long, title: String): Boolean {
         return try {
             var start = if (out.exists()) out.length() else 0L
             val rb = Request.Builder().url(url)
-            headers?.keys()?.forEach { k -> rb.header(k, headers.getString(k)) }
             if (start > 0) rb.header("Range", "bytes=$start-")
 
             client.newCall(rb.build()).execute().use { resp ->
@@ -122,42 +113,52 @@ class DownloadWorker @AssistedInject constructor(
         }
     }
 
-    private fun saveToMediaStore(file: File, name: String): String {
+    private fun saveToStore(file: File, name: String, audio: Boolean): String {
         val resolver = applicationContext.contentResolver
+        val mime = if (audio) "audio/mpeg" else "video/mp4"
+        val relDir = (if (audio) Environment.DIRECTORY_MUSIC else Environment.DIRECTORY_MOVIES) + "/RDownloader"
+
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             val values = ContentValues().apply {
-                put(MediaStore.Video.Media.DISPLAY_NAME, name)
-                put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
-                put(
-                    MediaStore.Video.Media.RELATIVE_PATH,
-                    Environment.DIRECTORY_MOVIES + "/RDownloader",
-                )
-                put(MediaStore.Video.Media.IS_PENDING, 1)
+                put(MediaStore.MediaColumns.DISPLAY_NAME, name)
+                put(MediaStore.MediaColumns.MIME_TYPE, mime)
+                put(MediaStore.MediaColumns.RELATIVE_PATH, relDir)
+                put(MediaStore.MediaColumns.IS_PENDING, 1)
             }
-            val collection =
+            val collection: Uri = if (audio) {
+                MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+            } else {
                 MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+            }
             val uri = resolver.insert(collection, values)!!
             resolver.openOutputStream(uri).use { os -> file.inputStream().use { it.copyTo(os!!) } }
             values.clear()
-            values.put(MediaStore.Video.Media.IS_PENDING, 0)
+            values.put(MediaStore.MediaColumns.IS_PENDING, 0)
             resolver.update(uri, values, null, null)
             uri.toString()
         } else {
             @Suppress("DEPRECATION")
             val dir = File(
-                Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES),
+                Environment.getExternalStoragePublicDirectory(
+                    if (audio) Environment.DIRECTORY_MUSIC else Environment.DIRECTORY_MOVIES
+                ),
                 "RDownloader",
             )
             dir.mkdirs()
             val dest = File(dir, name)
             file.copyTo(dest, overwrite = true)
             val values = ContentValues().apply {
-                put(MediaStore.Video.Media.DISPLAY_NAME, name)
-                put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
+                put(MediaStore.MediaColumns.DISPLAY_NAME, name)
+                put(MediaStore.MediaColumns.MIME_TYPE, mime)
                 @Suppress("DEPRECATION")
-                put(MediaStore.Video.Media.DATA, dest.absolutePath)
+                put(MediaStore.MediaColumns.DATA, dest.absolutePath)
             }
-            val uri = resolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values)
+            val collection = if (audio) {
+                MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
+            } else {
+                MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+            }
+            val uri = resolver.insert(collection, values)
             uri?.toString() ?: dest.absolutePath
         }
     }
@@ -182,9 +183,8 @@ class DownloadWorker @AssistedInject constructor(
 
     companion object {
         const val KEY_ID = "id"
-        const val KEY_DIRECT = "direct"
-        const val KEY_PROXY = "proxy"
-        const val KEY_HEADERS = "headers"
+        const val KEY_URL = "url"
+        const val KEY_AUDIO = "audio"
         const val KEY_TITLE = "title"
         const val KEY_STAMP = "stamp"
     }

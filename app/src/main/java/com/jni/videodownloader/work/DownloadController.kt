@@ -8,22 +8,19 @@ import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.workDataOf
-import com.jni.videodownloader.domain.VideoInfo
+import com.jni.videodownloader.domain.DownloadMode
 import dagger.hilt.android.qualifiers.ApplicationContext
-import org.json.JSONObject
 import java.util.concurrent.TimeUnit
 import javax.inject.Inject
 
 class DownloadController @Inject constructor(
     @ApplicationContext private val ctx: Context,
 ) {
-    fun enqueue(downloadId: Long, info: VideoInfo, title: String) {
-        val headersJson = JSONObject(info.headers as Map<*, *>).toString()
+    fun enqueue(downloadId: Long, url: String, mode: DownloadMode, title: String) {
         val data = workDataOf(
             DownloadWorker.KEY_ID to downloadId,
-            DownloadWorker.KEY_DIRECT to info.directUrl,
-            DownloadWorker.KEY_PROXY to info.proxyUrl,
-            DownloadWorker.KEY_HEADERS to headersJson,
+            DownloadWorker.KEY_URL to url,
+            DownloadWorker.KEY_AUDIO to (mode == DownloadMode.AUDIO),
             DownloadWorker.KEY_TITLE to title,
             DownloadWorker.KEY_STAMP to System.currentTimeMillis(),
         )
