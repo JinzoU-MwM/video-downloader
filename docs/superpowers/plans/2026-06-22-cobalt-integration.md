@@ -13,11 +13,12 @@
 - **Cobalt is internal-only:** no host port mapping; reachable only via the compose service name `cobalt-api` on port `9000`. No Turnstile/API-key.
 - **Cobalt image tag:** pin to the current stable major (verify on GHCR before deploy; at time of writing `ghcr.io/imputnet/cobalt:11`). Never use `:latest` in compose.
 - **Video output is always MP4 (H.264):** do not set `allowH265`; no video-format/codec picker.
+- **WhatsApp-optimize (`wa=1`, video only):** when set, the backend re-encodes the fetched file with **ffmpeg** to a WhatsApp-friendly profile (H.264 high / yuv420p / AAC / `+faststart`, cap 720p, `-preset veryfast`). **ffmpeg STAYS in the backend image** (it is NOT removed). Honest caveat surfaced in the UI: WhatsApp still recompresses inline video; this only minimizes degradation. Ignored when `mode=audio`.
 - **`alwaysProxy: true`** on every Cobalt request so the backend always receives a fetchable tunnel URL (never a bare CDN redirect).
 - **Backend reuse:** keep HMAC token signing (`proxy.sign`/`proxy.verify`), per-URL `asyncio.Lock`, cache dir + TTL cleanup, and `FileResponse` Range support exactly as they work today.
 - **Android:** minSdk 26, targetSdk/compileSdk 34, Kotlin 2.0.20, KSP (not kapt). No Room schema change (`title`/`thumbnail` already nullable).
 - **Commit messages:** do NOT add any "Co-Authored-By: Claude" / AI co-author line (user global rule).
-- **Quality allowlist (backend):** `{max, 4320, 2160, 1440, 1080, 720, 480, 360, 240, 144}`, default `1080`. **Mode allowlist:** `{video, audio}`, default `video`. The Android UI exposes a subset (Max/1080/720/480).
+- **Quality allowlist (backend):** `{max, 4320, 2160, 1440, 1080, 720, 480, 360, 240, 144}`, default `1080`. **Mode allowlist:** `{video, audio}`, default `video`. **`wa` accepted values:** `{0, 1, true, false, yes, no}`, default `0`. The Android UI exposes a subset (Max/1080/720/480 + WhatsApp/Audio toggles).
 
 ---
 
@@ -207,19 +208,21 @@ git commit -m "feat(backend): add Cobalt client (resolve/health) + config"
 
 ---
 
-### Task 2: Rewrite endpoints + slim down extractor
+### Task 2: Rewrite endpoints + slim extractor + WhatsApp transcode
 
 **Files:**
 - Modify: `backend/app/extractor.py` (strip all yt-dlp; keep `detect_platform`)
-- Modify: `backend/app/main.py` (new `/extract`, `/media`, `/health`; remove `/proxy`)
-- Test: `backend/tests/test_main.py` (new); `backend/tests/test_extractor.py` (unchanged — must still pass)
+- Create: `backend/app/transcode.py` (WhatsApp ffmpeg profile)
+- Modify: `backend/app/main.py` (new `/extract`, `/media` with `wa`, `/health`; remove `/proxy`)
+- Test: `backend/tests/test_transcode.py` (new); `backend/tests/test_main.py` (new); `backend/tests/test_extractor.py` (unchanged — must still pass)
 
 **Interfaces:**
 - Consumes: `cobalt.resolve`, `cobalt.health`, `cobalt.QUALITIES`, `cobalt.MODES`, `cobalt.CobaltError`; `extractor.detect_platform`; `proxy.sign`/`proxy.verify`.
 - Produces:
+  - `transcode.whatsapp_args(src: str, dst: str) -> list[str]`; `transcode.transcode_whatsapp(src: str, dst: str)`
   - `POST /extract {url}` → `{platform, title:null, thumbnail:null, duration:null, video:{url, ext:"mp4", filesize:null, http_headers:{}}, proxy_token:null}`
-  - `GET /media?token=&quality=&mode=` → streamed file (400 bad param, 403 bad token, 422 cobalt error)
-  - `main._download_via_cobalt(page_url, quality, mode, path)` (monkeypatched in tests)
+  - `GET /media?token=&quality=&mode=&wa=` → streamed file (400 bad param, 403 bad token, 422 cobalt error)
+  - `main._download_via_cobalt(page_url, quality, mode, wa: bool, path)` (monkeypatched in tests)
 
 - [ ] **Step 1: Slim `extractor.py`**
 
@@ -243,6 +246,23 @@ def detect_platform(url: str):
 ```
 
 - [ ] **Step 2: Write the failing tests**
+
+Create `backend/tests/test_transcode.py`:
+
+```python
+import app.transcode as transcode
+
+
+def test_whatsapp_args_has_key_flags():
+    args = transcode.whatsapp_args("in.mp4", "out.mp4")
+    assert args[0] == "ffmpeg"
+    assert args[-1] == "out.mp4"
+    assert "libx264" in args
+    assert "yuv420p" in args
+    assert "aac" in args
+    assert "-movflags" in args
+    assert "+faststart" in args
+```
 
 Create `backend/tests/test_main.py`:
 
@@ -292,10 +312,15 @@ def test_media_bad_mode():
     assert r.status_code == 400
 
 
+def test_media_bad_wa():
+    r = client.get(f"/media{_token_query()}&quality=720&mode=video&wa=2")
+    assert r.status_code == 400
+
+
 def test_media_success(tmp_path, monkeypatch):
     monkeypatch.setattr(main.settings, "media_dir", str(tmp_path))
 
-    def fake_dl(page_url, quality, mode, path):
+    def fake_dl(page_url, quality, mode, wa, path):
         with open(path, "wb") as f:
             f.write(b"FAKEDATA")
 
@@ -306,10 +331,24 @@ def test_media_success(tmp_path, monkeypatch):
     assert r.headers["content-type"].startswith("video/mp4")
 
 
+def test_media_wa_flag_passed_through(tmp_path, monkeypatch):
+    monkeypatch.setattr(main.settings, "media_dir", str(tmp_path))
+    seen = {}
+
+    def fake_dl(page_url, quality, mode, wa, path):
+        seen["wa"] = wa
+        open(path, "wb").write(b"X")
+
+    monkeypatch.setattr(main, "_download_via_cobalt", fake_dl)
+    r = client.get(f"/media{_token_query()}&quality=720&mode=video&wa=1")
+    assert r.status_code == 200
+    assert seen["wa"] is True
+
+
 def test_media_audio_content_type(tmp_path, monkeypatch):
     monkeypatch.setattr(main.settings, "media_dir", str(tmp_path))
     monkeypatch.setattr(main, "_download_via_cobalt",
-                        lambda page_url, quality, mode, path: open(path, "wb").write(b"A"))
+                        lambda page_url, quality, mode, wa, path: open(path, "wb").write(b"A"))
     r = client.get(f"/media{_token_query()}&quality=720&mode=audio")
     assert r.status_code == 200
     assert r.headers["content-type"].startswith("audio/mpeg")
@@ -318,7 +357,7 @@ def test_media_audio_content_type(tmp_path, monkeypatch):
 def test_media_cobalt_error(tmp_path, monkeypatch):
     monkeypatch.setattr(main.settings, "media_dir", str(tmp_path))
 
-    def boom(page_url, quality, mode, path):
+    def boom(page_url, quality, mode, wa, path):
         raise main.cobalt.CobaltError("slideshow not supported")
 
     monkeypatch.setattr(main, "_download_via_cobalt", boom)
@@ -328,10 +367,44 @@ def test_media_cobalt_error(tmp_path, monkeypatch):
 
 - [ ] **Step 3: Run tests to verify they fail**
 
-Run: `pytest tests/test_main.py -v`
-Expected: FAIL — current `main.py` imports `from .extractor import ExtractError, extract` (now removed) → `ImportError`, and the response shape/params differ.
+Run: `pytest tests/test_transcode.py tests/test_main.py -v`
+Expected: FAIL — `app.transcode` does not exist yet, and current `main.py` imports `from .extractor import ExtractError, extract` (now removed) → `ImportError`.
 
-- [ ] **Step 4: Rewrite `main.py`**
+- [ ] **Step 4a: Implement `transcode.py`**
+
+Create `backend/app/transcode.py`:
+
+```python
+import shutil
+import subprocess
+
+
+def whatsapp_args(src: str, dst: str) -> list[str]:
+    # Cap the minor axis to 720 without upscaling, keep aspect, force even dims.
+    # landscape (iw>ih): height 720, width auto-even; portrait: width 720, height auto-even.
+    vf = (
+        "scale="
+        "w='if(gt(iw,ih),-2,trunc(min(720,iw)/2)*2)':"
+        "h='if(gt(iw,ih),trunc(min(720,ih)/2)*2,-2)'"
+    )
+    return [
+        "ffmpeg", "-y", "-i", src,
+        "-vf", vf,
+        "-c:v", "libx264", "-profile:v", "high", "-pix_fmt", "yuv420p",
+        "-crf", "23", "-preset", "veryfast",
+        "-c:a", "aac", "-b:a", "128k",
+        "-movflags", "+faststart",
+        dst,
+    ]
+
+
+def transcode_whatsapp(src: str, dst: str):
+    if shutil.which("ffmpeg") is None:
+        raise RuntimeError("ffmpeg not available")
+    subprocess.run(whatsapp_args(src, dst), check=True, capture_output=True)
+```
+
+- [ ] **Step 4b: Rewrite `main.py`**
 
 Replace the entire contents of `backend/app/main.py` with:
 
@@ -346,7 +419,7 @@ from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from . import cobalt, extractor, proxy
+from . import cobalt, extractor, proxy, transcode
 from .config import settings
 
 app = FastAPI(title="video-dl-api")
@@ -364,6 +437,10 @@ def _require_key(x_api_key: str | None):
         raise HTTPException(status_code=401, detail="invalid api key")
 
 
+def _truthy(v: str) -> bool:
+    return v.lower() in ("1", "true", "yes")
+
+
 @app.get("/health")
 def health():
     return {"status": "ok", "cobalt": cobalt.health()}
@@ -376,8 +453,8 @@ def do_extract(req: ExtractReq, x_api_key: str | None = Header(default=None)):
     if platform is None:
         raise HTTPException(status_code=422, detail="unsupported platform")
 
-    # Cobalt returns no metadata; the app picks quality/mode in its options dialog
-    # and appends them to this /media URL. The token signs only the source URL.
+    # Cobalt returns no metadata; the app picks quality/mode/wa in its options
+    # dialog and appends them to this /media URL. The token signs only the URL.
     media_token = proxy.sign({"url": req.url})
     base = settings.public_base_url.rstrip("/")
     return {
@@ -406,20 +483,27 @@ def _cleanup_media():
         pass
 
 
-def _download_via_cobalt(page_url: str, quality: str, mode: str, path: str):
-    """Resolve via Cobalt then stream the tunnel file to `path`."""
+def _download_via_cobalt(page_url: str, quality: str, mode: str, wa: bool, path: str):
+    """Resolve via Cobalt, stream the file, optionally transcode for WhatsApp."""
     result = cobalt.resolve(page_url, quality, mode)
-    tmp = path + ".part"
+    src = path + ".src"
     with httpx.stream("GET", result["url"], timeout=None, follow_redirects=True) as r:
         r.raise_for_status()
-        with open(tmp, "wb") as f:
+        with open(src, "wb") as f:
             for chunk in r.iter_bytes(65536):
                 f.write(chunk)
-    os.replace(tmp, path)
+    if wa and mode == "video":
+        try:
+            transcode.transcode_whatsapp(src, path)
+        finally:
+            if os.path.exists(src):
+                os.remove(src)
+    else:
+        os.replace(src, path)
 
 
 @app.get("/media")
-async def media(token: str, quality: str = "1080", mode: str = "video"):
+async def media(token: str, quality: str = "1080", mode: str = "video", wa: str = "0"):
     try:
         data = proxy.verify(token)
     except ValueError as e:
@@ -428,6 +512,9 @@ async def media(token: str, quality: str = "1080", mode: str = "video"):
         raise HTTPException(status_code=400, detail="bad quality")
     if mode not in cobalt.MODES:
         raise HTTPException(status_code=400, detail="bad mode")
+    if wa.lower() not in ("0", "1", "true", "false", "yes", "no"):
+        raise HTTPException(status_code=400, detail="bad wa")
+    wa_flag = _truthy(wa)
 
     page_url = data["url"]
     os.makedirs(settings.media_dir, exist_ok=True)
@@ -435,14 +522,14 @@ async def media(token: str, quality: str = "1080", mode: str = "video"):
 
     ext = "mp3" if mode == "audio" else "mp4"
     media_type = "audio/mpeg" if mode == "audio" else "video/mp4"
-    h = hashlib.sha256(f"{page_url}|{quality}|{mode}".encode()).hexdigest()[:24]
+    h = hashlib.sha256(f"{page_url}|{quality}|{mode}|{wa_flag}".encode()).hexdigest()[:24]
     path = os.path.join(settings.media_dir, f"{h}.{ext}")
 
     lock = _media_locks.setdefault(h, asyncio.Lock())
     async with lock:
         if not (os.path.exists(path) and os.path.getsize(path) > 0):
             try:
-                await asyncio.to_thread(_download_via_cobalt, page_url, quality, mode, path)
+                await asyncio.to_thread(_download_via_cobalt, page_url, quality, mode, wa_flag, path)
             except cobalt.CobaltError as e:
                 raise HTTPException(status_code=422, detail=str(e))
 
@@ -453,13 +540,13 @@ async def media(token: str, quality: str = "1080", mode: str = "video"):
 - [ ] **Step 5: Run the full backend test suite**
 
 Run: `pytest -v`
-Expected: PASS — `test_cobalt.py` (8), `test_main.py` (8), `test_extractor.py` (4) all green.
+Expected: PASS — `test_cobalt.py` (8), `test_transcode.py` (1), `test_main.py` (10), `test_extractor.py` (4) all green.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add backend/app/extractor.py backend/app/main.py backend/tests/test_main.py
-git commit -m "feat(backend): Cobalt-only /extract + /media (quality/mode), drop yt-dlp paths"
+git add backend/app/extractor.py backend/app/transcode.py backend/app/main.py backend/tests/test_transcode.py backend/tests/test_main.py
+git commit -m "feat(backend): Cobalt-only /extract + /media (quality/mode/wa) with WhatsApp transcode; drop yt-dlp paths"
 ```
 
 ---
@@ -468,7 +555,7 @@ git commit -m "feat(backend): Cobalt-only /extract + /media (quality/mode), drop
 
 **Files:**
 - Modify: `backend/requirements.txt` (remove yt-dlp)
-- Modify: `backend/Dockerfile` (remove ffmpeg)
+- Unchanged: `backend/Dockerfile` (ffmpeg STAYS — required by the WhatsApp transcode)
 - Modify: `backend/docker-compose.yml` (add `cobalt-api`, wire `COBALT_API_URL`)
 - Delete: `scripts/ytdlp-autoupdate.sh`, `scripts/install-cron.sh` (yt-dlp-specific)
 
@@ -485,13 +572,15 @@ httpx==0.27.2
 pytest==8.3.2
 ```
 
-- [ ] **Step 2: Trim `Dockerfile` (ffmpeg no longer needed)**
+- [ ] **Step 2: Confirm `Dockerfile` keeps ffmpeg (no change)**
 
-Replace the entire contents of `backend/Dockerfile` with:
+The WhatsApp transcode (`wa=1`) shells out to ffmpeg, so it must stay in the image. No edit needed — confirm `backend/Dockerfile` still reads:
 
 ```dockerfile
 FROM python:3.12-slim
 WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY app ./app
@@ -541,13 +630,13 @@ Run:
 docker compose -f backend/docker-compose.yml config
 docker build -t video-dl-api-test backend
 ```
-Expected: `config` prints both services with no errors; the build succeeds (no ffmpeg/yt-dlp install steps).
+Expected: `config` prints both services with no errors; the build succeeds (yt-dlp gone from `pip install`; ffmpeg still installed for the transcode).
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add backend/requirements.txt backend/Dockerfile backend/docker-compose.yml
-git commit -m "feat(backend): run Cobalt as internal sidecar; remove yt-dlp/ffmpeg deps"
+git add backend/requirements.txt backend/docker-compose.yml
+git commit -m "feat(backend): run Cobalt as internal sidecar; drop yt-dlp dep (keep ffmpeg)"
 ```
 
 > **Deploy note (manual, post-merge):** on jni-server, `docker compose pull cobalt-api && docker compose up -d`. Replace the old yt-dlp auto-update cron with a Cobalt one (e.g. Watchtower watching `cobalt-api`, or a daily `docker compose pull cobalt-api && docker compose up -d`). Update README to drop yt-dlp references. These are ops steps, not code, and are out of this plan's automated scope.
@@ -569,7 +658,7 @@ git commit -m "feat(backend): run Cobalt as internal sidecar; remove yt-dlp/ffmp
 - Produces:
   - `enum class DownloadMode { VIDEO, AUDIO }`
   - `enum class VideoQuality(apiValue: String, label: String) { MAX, Q1080, Q720, Q480 }` + `VideoQuality.fromApiValue(String?): VideoQuality`
-  - `data class DownloadOptions(quality, mode)` with `mediaUrl(base: String): String` and `val fileExt: String`
+  - `data class DownloadOptions(quality, mode, whatsapp: Boolean = false)` with `mediaUrl(base: String): String` (appends `&wa=1` only when `whatsapp && mode == VIDEO`) and `val fileExt: String`
   - `fun defaultTitle(platform: Platform, createdAt: Long): String`
 
 - [ ] **Step 1: Write the failing test**
@@ -616,6 +705,24 @@ class DownloadOptionsTest {
     fun defaultTitle_contains_platform_name() {
         assertTrue(defaultTitle(Platform.TIKTOK, 0L).contains("TIKTOK"))
     }
+
+    @Test
+    fun whatsapp_video_appends_wa_flag() {
+        val o = DownloadOptions(VideoQuality.Q720, DownloadMode.VIDEO, whatsapp = true)
+        assertEquals(
+            "https://h/media?token=X&quality=720&mode=video&wa=1",
+            o.mediaUrl("https://h/media?token=X"),
+        )
+    }
+
+    @Test
+    fun whatsapp_ignored_for_audio() {
+        val o = DownloadOptions(VideoQuality.Q720, DownloadMode.AUDIO, whatsapp = true)
+        assertEquals(
+            "https://h/media?token=X&quality=720&mode=audio",
+            o.mediaUrl("https://h/media?token=X"),
+        )
+    }
 }
 ```
 
@@ -652,12 +759,14 @@ enum class VideoQuality(val apiValue: String, val label: String) {
 data class DownloadOptions(
     val quality: VideoQuality = VideoQuality.Q1080,
     val mode: DownloadMode = DownloadMode.VIDEO,
+    val whatsapp: Boolean = false,
 ) {
     /** base is the backend /media URL that already carries `?token=…`. */
     fun mediaUrl(base: String): String {
         val sep = if (base.contains("?")) "&" else "?"
         val m = if (mode == DownloadMode.AUDIO) "audio" else "video"
-        return "$base${sep}quality=${quality.apiValue}&mode=$m"
+        val wa = if (whatsapp && mode == DownloadMode.VIDEO) "&wa=1" else ""
+        return "$base${sep}quality=${quality.apiValue}&mode=$m$wa"
     }
 
     val fileExt: String get() = if (mode == DownloadMode.AUDIO) "mp3" else "mp4"
@@ -672,7 +781,7 @@ fun defaultTitle(platform: Platform, createdAt: Long): String {
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `./gradlew :app:testDebugUnitTest --tests "com.jni.videodownloader.domain.DownloadOptionsTest"`
-Expected: PASS (4 tests).
+Expected: PASS (6 tests).
 
 - [ ] **Step 5: Commit**
 
@@ -717,18 +826,21 @@ class Prefs @Inject constructor(@ApplicationContext ctx: Context) {
     fun lastOptions(): DownloadOptions = DownloadOptions(
         quality = VideoQuality.fromApiValue(sp.getString(KEY_QUALITY, null)),
         mode = if (sp.getString(KEY_MODE, "video") == "audio") DownloadMode.AUDIO else DownloadMode.VIDEO,
+        whatsapp = sp.getBoolean(KEY_WA, false),
     )
 
     fun save(options: DownloadOptions) {
         sp.edit()
             .putString(KEY_QUALITY, options.quality.apiValue)
             .putString(KEY_MODE, if (options.mode == DownloadMode.AUDIO) "audio" else "video")
+            .putBoolean(KEY_WA, options.whatsapp)
             .apply()
     }
 
     private companion object {
         const val KEY_QUALITY = "quality"
         const val KEY_MODE = "mode"
+        const val KEY_WA = "wa"
     }
 }
 ```
@@ -965,6 +1077,7 @@ private fun OptionsCard(
 ) {
     var quality by remember { mutableStateOf(initial.quality) }
     var audio by remember { mutableStateOf(initial.mode == DownloadMode.AUDIO) }
+    var whatsapp by remember { mutableStateOf(initial.whatsapp) }
 
     PreviewCard {
         Text(platformName, style = MaterialTheme.typography.titleMedium)
@@ -990,6 +1103,17 @@ private fun OptionsCard(
             Switch(checked = audio, onCheckedChange = { audio = it })
         }
 
+        Spacer(Modifier.height(8.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("Optimalkan untuk WhatsApp (HD)")
+            Spacer(Modifier.width(8.dp))
+            Switch(checked = whatsapp && !audio, enabled = !audio, onCheckedChange = { whatsapp = it })
+        }
+        Text(
+            "WhatsApp tetap mengompres video; opsi ini meminimalkan 'pecah'.",
+            style = MaterialTheme.typography.labelSmall,
+        )
+
         Spacer(Modifier.height(16.dp))
         Row {
             TextButton(onClick = onCancel) { Text("Batal") }
@@ -999,6 +1123,7 @@ private fun OptionsCard(
                     DownloadOptions(
                         quality = quality,
                         mode = if (audio) DownloadMode.AUDIO else DownloadMode.VIDEO,
+                        whatsapp = whatsapp && !audio,
                     )
                 )
             }) { Text("Unduh") }
@@ -1308,11 +1433,12 @@ git commit -m "feat(app): worker downloads single URL; save audio to Audio Media
 - [ ] **Step 5: Manual device acceptance (final)**
 
 Build the signed debug APK via the existing VPS pipeline (`scripts/build-on-vps.ps1`), install on a real device, then:
-1. Share a public TikTok video → options dialog shows quality chips + Audio switch → pick 720p → Unduh → file lands in Gallery (Movies/RDownloader), plays, **no watermark**.
-2. Repeat with Audio switch ON → MP3 lands in Music/RDownloader, plays.
+1. Share a public TikTok video → options dialog shows quality chips + Audio switch + WhatsApp switch → pick 720p → Unduh → file lands in Gallery (Movies/RDownloader), plays, **no watermark**.
+2. Repeat with Audio switch ON → MP3 lands in Music/RDownloader, plays. Confirm the WhatsApp switch is disabled while Audio is on.
 3. Repeat for an Instagram reel and a Facebook video.
-4. Confirm "remember last choice": reopen the dialog → last quality/mode pre-selected.
+4. Confirm "remember last choice": reopen the dialog → last quality/mode/WhatsApp pre-selected.
 5. Toggle airplane mode mid-download → download resumes when network returns.
+6. Turn ON "Optimalkan untuk WhatsApp", download, then send the file to a WhatsApp chat → compare sharpness against the same video downloaded with the option OFF (optimized one should hold up better after WhatsApp's compression).
 
 ---
 
@@ -1323,14 +1449,15 @@ Build the signed debug APK via the existing VPS pipeline (`scripts/build-on-vps.
   - `config.cobalt_api_url` → Task 1. ✅
   - `cobalt.py` client + status mapping (tunnel/redirect/picker/error) → Task 1. ✅
   - `/extract` mints token, no metadata → Task 2. ✅
-  - `/media?quality&mode`, allowlist, cache key incl. quality+mode, Range → Task 2. ✅
+  - `/media?quality&mode&wa`, allowlist, cache key incl. quality+mode+wa, Range → Task 2. ✅
+  - WhatsApp transcode (`transcode.py` ffmpeg profile, `wa=1` video-only) → Task 2. ✅
   - `/health` reports Cobalt → Task 2. ✅
-  - Remove yt-dlp/ffmpeg/`/proxy`/autoupdate scripts → Tasks 2 & 3. ✅
-  - Options dialog (quality, audio, remember) → Tasks 4–6. ✅
+  - Remove yt-dlp/`/proxy`/autoupdate scripts; **keep ffmpeg** for WA transcode → Tasks 2 & 3. ✅
+  - Options dialog (quality, audio, WhatsApp, remember) → Tasks 4–6. ✅
   - Audio → Audio MediaStore → Task 7. ✅
   - Local title from platform+timestamp → Task 4 (`defaultTitle`) used in Task 6. ✅
   - Slideshow `picker` → friendly error (audio exception) → Task 1. ✅
 - **Placeholder scan:** none — every code/test step has full content. The single deploy note (cron/README) is explicitly flagged as manual ops, out of automated scope.
-- **Type consistency:** `enqueue(id, url, mode, title)` defined in Task 7 matches the call in Task 6; worker `KEY_URL`/`KEY_AUDIO` defined and consumed in Task 7; `DownloadOptions.mediaUrl`/`fileExt`/`VideoQuality.fromApiValue`/`defaultTitle` defined in Task 4 and used in Tasks 6–7; `cobalt.resolve` return `{kind,url,filename}` consumed by `_download_via_cobalt` in Task 2.
+- **Type consistency:** `enqueue(id, url, mode, title)` defined in Task 7 matches the call in Task 6; worker `KEY_URL`/`KEY_AUDIO` defined and consumed in Task 7; `DownloadOptions(quality, mode, whatsapp)` + `mediaUrl`/`fileExt`/`VideoQuality.fromApiValue`/`defaultTitle` defined in Task 4 and used in Tasks 5–7; `_download_via_cobalt(page_url, quality, mode, wa, path)` signature matches the monkeypatched fakes in `test_main.py` and the call site in `/media`; `transcode.whatsapp_args`/`transcode_whatsapp` defined in Task 2 and consumed by `_download_via_cobalt`; `cobalt.resolve` return `{kind,url,filename}` consumed by `_download_via_cobalt`.
 - **Cross-task ordering note:** Task 6 references Task 7's controller signature — flagged inline; subagent-driven flow reviews them together.
 ```
