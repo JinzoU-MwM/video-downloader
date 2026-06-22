@@ -8,6 +8,7 @@ class Settings:
     public_base_url: str = os.environ.get("PUBLIC_BASE_URL", "https://rdl-api.jni.my.id")
     media_dir: str = os.environ.get("MEDIA_DIR", "/tmp/media")
     media_ttl: int = int(os.environ.get("MEDIA_TTL", "7200"))
+    cobalt_api_url: str = os.environ.get("COBALT_API_URL", "http://cobalt-api:9000/")
 
 
 settings = Settings()
