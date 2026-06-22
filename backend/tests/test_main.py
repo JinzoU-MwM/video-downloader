@@ -124,6 +124,20 @@ def test_download_transcode_failure_raises(tmp_path, monkeypatch):
         main._download_via_cobalt("u", "720", "video", True, out)
 
 
+def test_download_fetch_http_error_raises(tmp_path, monkeypatch):
+    monkeypatch.setattr(main.cobalt, "resolve",
+                        lambda u, q, m: {"kind": "tunnel", "url": "http://x", "filename": "f"})
+
+    def bad_fetch(url, dst):
+        raise main.httpx.ConnectError("boom")
+
+    monkeypatch.setattr(main, "_fetch", bad_fetch)
+    out = str(tmp_path / "o.mp4")
+    with pytest.raises(main.cobalt.CobaltError):
+        main._download_via_cobalt("u", "720", "video", False, out)
+    assert not os.path.exists(out)
+
+
 def test_download_video_success(tmp_path, monkeypatch):
     monkeypatch.setattr(main.cobalt, "resolve",
                         lambda u, q, m: {"kind": "tunnel", "url": "http://x", "filename": "f"})

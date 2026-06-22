@@ -88,9 +88,14 @@ def _download_via_cobalt(page_url: str, quality: str, mode: str, wa: bool, path:
     Raises CobaltError (-> 422) on an empty upstream body or a transcode failure
     so we never cache/serve a 0-byte file or leak a 500.
     """
-    result = cobalt.resolve(page_url, quality, mode)
     src = path + ".src"
-    _fetch(result["url"], src)
+    try:
+        result = cobalt.resolve(page_url, quality, mode)
+        _fetch(result["url"], src)
+    except httpx.HTTPError as e:
+        if os.path.exists(src):
+            os.remove(src)
+        raise cobalt.CobaltError(f"download failed: {type(e).__name__}")
     if os.path.getsize(src) == 0:
         os.remove(src)
         raise cobalt.CobaltError("empty media from upstream")

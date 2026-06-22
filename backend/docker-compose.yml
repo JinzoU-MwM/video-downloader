@@ -12,12 +12,13 @@ services:
       - cobalt-api
 
   cobalt-api:
-    # Pin to the current stable major (verified against the upstream example).
-    image: ghcr.io/imputnet/cobalt:11
+    # Pin to v10: v11 (11.7.1) has a broken tunnel (streams 0 bytes / content-length:0),
+    # see imputnet/cobalt issues #1455, #1317. v10 streams correctly. read_only removed
+    # (didn't help the tunnel and is not required).
+    image: ghcr.io/imputnet/cobalt:10
     container_name: cobalt-api
     restart: unless-stopped
     init: true
-    read_only: true
     environment:
       - API_URL=http://cobalt-api:9000/
     # internal-only: no `ports:` block on purpose.
