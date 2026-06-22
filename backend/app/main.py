@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import os
+import subprocess
 import time
 
 import httpx
@@ -72,18 +73,34 @@ def _cleanup_media():
         pass
 
 
-def _download_via_cobalt(page_url: str, quality: str, mode: str, wa: bool, path: str):
-    """Resolve via Cobalt, stream the file, optionally transcode for WhatsApp."""
-    result = cobalt.resolve(page_url, quality, mode)
-    src = path + ".src"
-    with httpx.stream("GET", result["url"], timeout=None, follow_redirects=True) as r:
+def _fetch(url: str, dst: str):
+    """Stream a full HTTP body to dst."""
+    with httpx.stream("GET", url, timeout=None, follow_redirects=True) as r:
         r.raise_for_status()
-        with open(src, "wb") as f:
+        with open(dst, "wb") as f:
             for chunk in r.iter_bytes(65536):
                 f.write(chunk)
+
+
+def _download_via_cobalt(page_url: str, quality: str, mode: str, wa: bool, path: str):
+    """Resolve via Cobalt, stream the file, optionally transcode for WhatsApp.
+
+    Raises CobaltError (-> 422) on an empty upstream body or a transcode failure
+    so we never cache/serve a 0-byte file or leak a 500.
+    """
+    result = cobalt.resolve(page_url, quality, mode)
+    src = path + ".src"
+    _fetch(result["url"], src)
+    if os.path.getsize(src) == 0:
+        os.remove(src)
+        raise cobalt.CobaltError("empty media from upstream")
     if wa and mode == "video":
         try:
             transcode.transcode_whatsapp(src, path)
+        except subprocess.CalledProcessError as e:
+            if os.path.exists(path):
+                os.remove(path)
+            raise cobalt.CobaltError(f"transcode failed (ffmpeg exit {e.returncode})")
         finally:
             if os.path.exists(src):
                 os.remove(src)

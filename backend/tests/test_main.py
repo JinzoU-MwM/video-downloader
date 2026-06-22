@@ -1,3 +1,7 @@
+import os
+import subprocess
+
+import pytest
 from fastapi.testclient import TestClient
 
 import app.main as main
@@ -94,3 +98,36 @@ def test_media_cobalt_error(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "_download_via_cobalt", boom)
     r = client.get(f"/media{_token_query()}&quality=720&mode=video")
     assert r.status_code == 422
+
+
+def test_download_empty_body_raises(tmp_path, monkeypatch):
+    monkeypatch.setattr(main.cobalt, "resolve",
+                        lambda u, q, m: {"kind": "tunnel", "url": "http://x", "filename": "f"})
+    monkeypatch.setattr(main, "_fetch", lambda url, dst: open(dst, "wb").close())  # 0 bytes
+    out = str(tmp_path / "o.mp4")
+    with pytest.raises(main.cobalt.CobaltError):
+        main._download_via_cobalt("u", "720", "video", False, out)
+    assert not os.path.exists(out)  # never cached an empty file
+
+
+def test_download_transcode_failure_raises(tmp_path, monkeypatch):
+    monkeypatch.setattr(main.cobalt, "resolve",
+                        lambda u, q, m: {"kind": "tunnel", "url": "http://x", "filename": "f"})
+    monkeypatch.setattr(main, "_fetch", lambda url, dst: open(dst, "wb").write(b"DATA"))
+
+    def boom(src, dst):
+        raise subprocess.CalledProcessError(183, ["ffmpeg"])
+
+    monkeypatch.setattr(main.transcode, "transcode_whatsapp", boom)
+    out = str(tmp_path / "o.mp4")
+    with pytest.raises(main.cobalt.CobaltError):
+        main._download_via_cobalt("u", "720", "video", True, out)
+
+
+def test_download_video_success(tmp_path, monkeypatch):
+    monkeypatch.setattr(main.cobalt, "resolve",
+                        lambda u, q, m: {"kind": "tunnel", "url": "http://x", "filename": "f"})
+    monkeypatch.setattr(main, "_fetch", lambda url, dst: open(dst, "wb").write(b"VIDEOBYTES"))
+    out = str(tmp_path / "o.mp4")
+    main._download_via_cobalt("u", "720", "video", False, out)
+    assert open(out, "rb").read() == b"VIDEOBYTES"
