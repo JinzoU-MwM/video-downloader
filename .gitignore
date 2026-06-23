@@ -17,6 +17,10 @@ captures/
 *-log.txt
 dist-src.tgz
 backend.tgz
+src.tgz
+
+# Tooling
+.serena/
 
 # OS
 .DS_Store
