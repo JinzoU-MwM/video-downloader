@@ -23,3 +23,11 @@ data class ExtractResponse(
     val video: VideoDto,
     @Json(name = "proxy_token") val proxyToken: String?,
 )
+
+@JsonClass(generateAdapter = true)
+data class AppLatest(
+    val versionCode: Int,
+    val versionName: String?,
+    val notes: String?,
+    val apkUrl: String,
+)

@@ -48,6 +48,12 @@ class DownloadRepository @Inject constructor(
     suspend fun resolve(url: String): VideoInfo =
         api.extract(apiKey, ExtractRequest(url)).toVideoInfo(baseUrl)
 
+    /** Returns the latest published app version if it's newer than [currentCode], else null. */
+    suspend fun latestUpdate(currentCode: Int): com.jni.videodownloader.data.net.AppLatest? {
+        val latest = api.appLatest()
+        return if (latest.versionCode > currentCode) latest else null
+    }
+
     fun observeAll(): Flow<List<Download>> =
         dao.observeAll().map { list -> list.map { it.toModel() } }
 

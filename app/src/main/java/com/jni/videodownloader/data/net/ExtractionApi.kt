@@ -1,6 +1,7 @@
 package com.jni.videodownloader.data.net
 
 import retrofit2.http.Body
+import retrofit2.http.GET
 import retrofit2.http.Header
 import retrofit2.http.POST
 
@@ -10,4 +11,7 @@ interface ExtractionApi {
         @Header("X-API-Key") apiKey: String,
         @Body req: ExtractRequest,
     ): ExtractResponse
+
+    @GET("app/latest")
+    suspend fun appLatest(): AppLatest
 }
