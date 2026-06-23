@@ -9,6 +9,7 @@ class Settings:
     media_dir: str = os.environ.get("MEDIA_DIR", "/tmp/media")
     media_ttl: int = int(os.environ.get("MEDIA_TTL", "7200"))
     cobalt_api_url: str = os.environ.get("COBALT_API_URL", "http://cobalt-api:9000/")
+    app_release_dir: str = os.environ.get("APP_RELEASE_DIR", "/release")
 
 
 settings = Settings()

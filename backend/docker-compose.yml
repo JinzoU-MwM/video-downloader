@@ -8,6 +8,8 @@ services:
       - COBALT_API_URL=http://cobalt-api:9000/
     ports:
       - "127.0.0.1:8091:8000"
+    volumes:
+      - ./release:/release:ro
     depends_on:
       - cobalt-api
 

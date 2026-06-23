@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import json
 import os
 import subprocess
 import time
@@ -34,6 +35,36 @@ def _truthy(v: str) -> bool:
 @app.get("/health")
 def health():
     return {"status": "ok", "cobalt": cobalt.health()}
+
+
+@app.get("/app/latest")
+def app_latest():
+    """Latest published app version. The Android app polls this on launch."""
+    vpath = os.path.join(settings.app_release_dir, "version.json")
+    try:
+        with open(vpath) as f:
+            data = json.load(f)
+    except (FileNotFoundError, ValueError):
+        data = {}
+    base = settings.public_base_url.rstrip("/")
+    return {
+        "versionCode": int(data.get("versionCode", 0)),
+        "versionName": data.get("versionName"),
+        "notes": data.get("notes"),
+        "apkUrl": f"{base}/app/download",
+    }
+
+
+@app.get("/app/download")
+def app_download():
+    apk = os.path.join(settings.app_release_dir, "app.apk")
+    if not os.path.exists(apk):
+        raise HTTPException(status_code=404, detail="no apk published")
+    return FileResponse(
+        apk,
+        media_type="application/vnd.android.package-archive",
+        filename="RDownloader.apk",
+    )
 
 
 @app.post("/extract")

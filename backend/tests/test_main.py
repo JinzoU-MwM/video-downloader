@@ -175,3 +175,36 @@ def test_download_video_success(tmp_path, monkeypatch):
     out = str(tmp_path / "o.mp4")
     main._download("u", "720", "video", False, out)
     assert open(out, "rb").read() == b"VIDEOBYTES"
+
+
+def test_app_latest_no_version_file(tmp_path, monkeypatch):
+    monkeypatch.setattr(main.settings, "app_release_dir", str(tmp_path))
+    r = client.get("/app/latest")
+    assert r.status_code == 200
+    b = r.json()
+    assert b["versionCode"] == 0
+    assert b["apkUrl"].endswith("/app/download")
+
+
+def test_app_latest_reads_version_json(tmp_path, monkeypatch):
+    monkeypatch.setattr(main.settings, "app_release_dir", str(tmp_path))
+    (tmp_path / "version.json").write_text('{"versionCode": 5, "versionName": "1.5", "notes": "hi"}')
+    r = client.get("/app/latest")
+    b = r.json()
+    assert b["versionCode"] == 5
+    assert b["versionName"] == "1.5"
+    assert b["notes"] == "hi"
+
+
+def test_app_download_404_when_missing(tmp_path, monkeypatch):
+    monkeypatch.setattr(main.settings, "app_release_dir", str(tmp_path))
+    assert client.get("/app/download").status_code == 404
+
+
+def test_app_download_serves_apk(tmp_path, monkeypatch):
+    monkeypatch.setattr(main.settings, "app_release_dir", str(tmp_path))
+    (tmp_path / "app.apk").write_bytes(b"PK\x03\x04APKDATA")
+    r = client.get("/app/download")
+    assert r.status_code == 200
+    assert r.content == b"PK\x03\x04APKDATA"
+    assert "android.package-archive" in r.headers["content-type"]
