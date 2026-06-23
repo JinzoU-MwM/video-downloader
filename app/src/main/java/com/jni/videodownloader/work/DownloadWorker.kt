@@ -106,6 +106,15 @@ class DownloadWorker @AssistedInject constructor(
                         }
                     }
                 }
+                // A truncated transfer (stream ended before the declared
+                // Content-Length) must not count as success — otherwise we
+                // save a partial, unplayable "1-second" file (the WhatsApp
+                // transcode uses +faststart, so the moov header survives and
+                // the clip looks full-length but the media data is cut off).
+                // Returning false lets WorkManager retry; by then the server
+                // has the file cached and serves it without the transcode
+                // delay that caused the truncation.
+                if (total > 0 && done != total) return false
             }
             true
         } catch (e: Exception) {
