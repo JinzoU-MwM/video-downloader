@@ -24,6 +24,16 @@ android {
         buildConfigField("String", "BACKEND_BASE_URL", "\"$backendBaseUrl\"")
         buildConfigField("String", "BACKEND_API_KEY", "\"$backendApiKey\"")
     }
+    signingConfigs {
+        // Fixed debug keystore (committed) so every build shares one signing key —
+        // required for in-app updates to install over the previous version.
+        getByName("debug") {
+            storeFile = file("debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
+    }
     buildTypes {
         release {
             isMinifyEnabled = false
